@@ -1110,6 +1110,19 @@ def secao_metodologia():
 # ---------------------------------------------------------------------------
 # Aplicação
 # ---------------------------------------------------------------------------
+@st.dialog("👋 Bem-vindo(a)")
+def _pedir_nome():
+    st.write("Antes de começar, como podemos te chamar?")
+    nome = st.text_input("Seu nome", key="input_nome_visitante",
+                         placeholder="ex.: Maria, Dr. Carlos, Equipe XYZ...")
+    st.caption("Usamos o nome apenas para entender quem utiliza a ferramenta.")
+    if st.button("Começar", type="primary", disabled=not (nome or "").strip(),
+                 width="stretch"):
+        st.session_state["nome_visitante"] = nome.strip()
+        telemetria.registrar("identificacao", nome=nome.strip())
+        st.rerun()
+
+
 def main():
     try:
         with st.spinner("Carregando dados do Censo IBGE 2022..."):
@@ -1120,6 +1133,8 @@ def main():
         return
 
     telemetria.registrar_sessao()
+    if not st.session_state.get("nome_visitante"):
+        _pedir_nome()
 
     with st.sidebar:
         st.markdown("### 🏡 Localização de ILPIs")

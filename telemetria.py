@@ -93,6 +93,7 @@ def registrar(evento: str, **dados):
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "sessao": _sessao_id(),
         "evento": evento,
+        "nome": st.session_state.get("nome_visitante"),
         "dados": {k: v for k, v in dados.items() if v not in (None, "")},
     }
     try:
@@ -106,6 +107,7 @@ def registrar(evento: str, **dados):
         origem = st.session_state.get("_tele_origem") or {}
         plano = {  # payload plano: mapeia 1:1 com os campos da tabela de logs
             "ts": payload["ts"], "sessao": payload["sessao"], "evento": evento,
+            "nome": str(payload.get("nome") or ""),
             "dados": json.dumps(payload["dados"], ensure_ascii=False, default=str),
             "ip": str(origem.get("ip") or ""),
             "user_agent": str(origem.get("user_agent") or ""),
