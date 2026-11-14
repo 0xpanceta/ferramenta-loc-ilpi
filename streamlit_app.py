@@ -6,6 +6,8 @@ população 70+, renda do responsável pelo domicílio e estimativa de idosos
 em faixas de renda alta, por estado → município → distrito → bairro.
 """
 
+import unicodedata
+
 import altair as alt
 import numpy as np
 import pandas as pd
@@ -178,6 +180,62 @@ def preparar_hierarquia():
 
 
 # ---------------------------------------------------------------------------
+# Base de ILPIs mapeadas (concorrência) — ver seção de metodologia
+# ---------------------------------------------------------------------------
+CORES_PERFIL = {
+    "privada": "#0D9488",
+    "sem fins lucrativos": "#94A3B8",
+    "pública": "#64748B",
+    "indefinida": "#CBD5E1",
+}
+
+
+def _sem_acento(texto) -> str:
+    if not isinstance(texto, str):
+        return ""
+    s = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode()
+    return s.lower()
+
+
+@st.cache_data(show_spinner=False)
+def preparar_ilpis():
+    """Base de ILPIs mapeadas (Sul-Sudeste), já com código IBGE do município.
+
+    Retorna DataFrame vazio se o arquivo não existir — o app segue funcionando."""
+    try:
+        ilpis = carregar_csv("dados_ilpis.csv")
+    except (FileNotFoundError, ValueError):
+        return pd.DataFrame()
+    for col in ("leitos_melhor", "lat", "lng", "rating_google",
+                "avaliacoes_google", "score_porte"):
+        ilpis[col] = pd.to_numeric(ilpis[col], errors="coerce")
+    for col in ("leitos_do_grupo", "promissora"):
+        ilpis[col] = pd.to_numeric(ilpis[col], errors="coerce").fillna(0).astype(int)
+    ilpis["texto_busca"] = (
+        ilpis["nome"].fillna("") + " " + ilpis["bairro"].fillna("")
+        + " " + ilpis["endereco"].fillna("")
+    ).map(_sem_acento)
+    ilpis["cor_mapa"] = ilpis["perfil_grupo"].map(CORES_PERFIL).fillna("#CBD5E1")
+    return ilpis
+
+
+def agregar_ilpis_por_municipio(ilpis):
+    """Oferta mapeada por município: nº de casas, privadas e leitos conhecidos."""
+    if ilpis.empty:
+        return pd.DataFrame(columns=["CD_MUN", "n_ilpis", "n_privadas",
+                                     "leitos_conhecidos", "n_com_leitos"])
+    base = ilpis[ilpis["cd_mun"].notna()].copy()
+    leitos_validos = base["leitos_melhor"].where(base["leitos_do_grupo"] == 0)
+    agg = base.assign(_leitos=leitos_validos).groupby("cd_mun").agg(
+        n_ilpis=("nome", "count"),
+        n_privadas=("perfil_grupo", lambda s: int((s == "privada").sum())),
+        leitos_conhecidos=("_leitos", "sum"),
+        n_com_leitos=("_leitos", lambda s: int(s.notna().sum())),
+    ).reset_index().rename(columns={"cd_mun": "CD_MUN"})
+    return agg
+
+
+# ---------------------------------------------------------------------------
 # Estimativa de idosos com renda acima de R$ 8 mil (distribuição log-normal)
 # ---------------------------------------------------------------------------
 def _erf(x):
@@ -331,10 +389,13 @@ ESPEC_COLUNAS = {
     "avg_income": ("moeda", "Renda média (R$)"),
     "income_std": ("moeda", "Desvio renda (R$)"),
     "elders_above_8k": ("inteiro", "Idosos > R$ 8 mil (est.)"),
+    "n_ilpis": ("inteiro", "ILPIs mapeadas"),
+    "leitos_conhecidos": ("inteiro", "Leitos conhecidos"),
+    "idosos70_por_leito": ("inteiro", "Idosos 70+ por leito conhecido"),
 }
 
 
-def montar_tabela(df, col_nome, rotulo_nome, incluir_uf=False):
+def montar_tabela(df, col_nome, rotulo_nome, incluir_uf=False, colunas_extras=None):
     """Prepara o dataframe de exibição e o column_config correspondente."""
     dados = df.copy()
     dados["pct_70"] = (
@@ -348,6 +409,8 @@ def montar_tabela(df, col_nome, rotulo_nome, incluir_uf=False):
     if "total_population" in dados.columns:
         ordem += ["pct_70", "total_population"]
     ordem += ["avg_income", "income_std"]
+    if colunas_extras:
+        ordem += list(colunas_extras)
     ordem = [c for c in ordem if c in dados.columns]
 
     tabela = dados[ordem].copy()
@@ -387,9 +450,11 @@ def botao_download(df, nome_arquivo, key):
     )
 
 
-def grafico_ranking(df, col_nome, titulo, maximo=15, minimo=3):
-    """Barras horizontais com o top N por potencial de mercado."""
-    top = df.nlargest(maximo, "elders_above_8k")[[col_nome, "elders_above_8k"]].copy()
+def grafico_ranking(df, col_nome, titulo, maximo=15, minimo=3,
+                    col_valor="elders_above_8k",
+                    rotulo_valor="Idosos 70+ com renda > R$ 8 mil"):
+    """Barras horizontais com o top N pela métrica escolhida."""
+    top = df.nlargest(maximo, col_valor)[[col_nome, col_valor]].copy()
     top.columns = ["nome", "valor"]
     top = top[top["valor"] > 0]
     if len(top) < minimo:
@@ -410,7 +475,7 @@ def grafico_ranking(df, col_nome, titulo, maximo=15, minimo=3):
     ).encode(
         tooltip=[
             alt.Tooltip("nome:N", title="Local"),
-            alt.Tooltip("rotulo:N", title="Idosos 70+ com renda > R$ 8 mil"),
+            alt.Tooltip("rotulo:N", title=rotulo_valor),
         ]
     )
     rotulos = base.mark_text(align="left", dx=6, color="#374151", fontSize=12).encode(
@@ -442,9 +507,266 @@ def exibir_metricas(df, rotulo_unidade):
 
 
 # ---------------------------------------------------------------------------
+# Componentes das abas de ILPIs
+# ---------------------------------------------------------------------------
+ESPEC_COLUNAS_ILPI = [
+    ("nome", st.column_config.TextColumn("ILPI", width="large")),
+    ("rede", st.column_config.TextColumn("", help="🏢 = capacidade pode ser do grupo/rede, não só desta unidade", width="small")),
+    ("municipio", st.column_config.TextColumn("Município")),
+    ("uf", st.column_config.TextColumn("UF", width="small")),
+    ("bairro", st.column_config.TextColumn("Bairro")),
+    ("leitos_melhor", st.column_config.NumberColumn("Leitos/vagas", format="localized",
+        help="Melhor número disponível — ver coluna Fonte. Vazio = não informado em nenhuma fonte.")),
+    ("fonte_leitos_melhor", st.column_config.TextColumn("Fonte dos leitos")),
+    ("score_porte", st.column_config.NumberColumn("Score porte/evidência", format="%.0f",
+        help="0-100: capacidade, reputação Google, presença digital, registros oficiais e capital social. Mede evidência de porte/operação, não qualidade.")),
+    ("perfil_grupo", st.column_config.TextColumn("Perfil")),
+    ("situacao", st.column_config.TextColumn("Situação Receita",
+        help="Vazio = CNPJ não identificado (casa vista só no Google Maps), não significa inativa.")),
+    ("rating_google", st.column_config.NumberColumn("Nota Google", format="%.1f ⭐")),
+    ("avaliacoes_google", st.column_config.NumberColumn("Avaliações", format="localized")),
+    ("telefone", st.column_config.TextColumn("Telefone")),
+    ("whatsapp", st.column_config.TextColumn("WhatsApp")),
+    ("website", st.column_config.LinkColumn("Site")),
+    ("endereco", st.column_config.TextColumn("Endereço", width="large")),
+]
+
+COLUNAS_REGIAO_ILPI = [
+    ("elderly_total", st.column_config.NumberColumn("Pop. 70+ do município", format="localized")),
+    ("avg_income", st.column_config.NumberColumn("Renda média do município (R$)", format="localized")),
+    ("elders_above_8k", st.column_config.NumberColumn("Idosos > R$ 8 mil no município", format="localized")),
+    ("leitos_conhecidos", st.column_config.NumberColumn("Leitos conhecidos no município", format="localized")),
+    ("idosos8k_por_leito", st.column_config.NumberColumn("Idosos > R$ 8 mil por leito conhecido", format="localized",
+        help="Demanda de alto padrão ÷ oferta mapeada. Quanto maior, menos concorrência conhecida. Só considera leitos informados — a oferta real é maior.")),
+]
+
+
+def montar_tabela_ilpis(df, incluir_regiao=False):
+    """Dataframe de exibição + column_config para listas de ILPIs."""
+    dados = df.copy()
+    dados["rede"] = np.where(dados["leitos_do_grupo"] == 1, "🏢", "")
+    for c in ("bairro", "endereco", "telefone", "whatsapp", "situacao",
+              "fonte_leitos_melhor", "municipio"):
+        if c in dados.columns:
+            dados[c] = dados[c].fillna("")
+    espec = list(ESPEC_COLUNAS_ILPI)
+    if incluir_regiao:
+        espec += COLUNAS_REGIAO_ILPI
+    colunas = [c for c, _ in espec if c in dados.columns]
+    config = {c: cfg for c, cfg in espec if c in dados.columns}
+    return dados[colunas], config
+
+
+def filtros_ilpis(prefixo, leitos_min=0, so_promissoras=False,
+                  incluir_sem_leitos=True, perfis_default=None):
+    """Painel de filtros reutilizado nas abas de ILPIs. Retorna dict de filtros."""
+    perfis = list(CORES_PERFIL.keys())
+    with st.expander("🎛️ Filtros das ILPIs", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            f_prom = st.toggle(
+                "⭐ Só promissoras", value=so_promissoras, key=f"{prefixo}_prom",
+                help="Privada · 35+ leitos · não baixada/inapta na Receita.",
+            )
+            f_perfis = st.multiselect(
+                "Perfil", perfis, default=perfis_default or perfis, key=f"{prefixo}_perfil"
+            )
+        with c2:
+            f_leitos = st.slider("Leitos mínimos", 0, 120, leitos_min, 5, key=f"{prefixo}_leitos")
+            f_sem_leitos = st.checkbox(
+                "Incluir casas sem leitos informados", value=incluir_sem_leitos,
+                key=f"{prefixo}_semleitos",
+                help="75% das casas não têm leitos em nenhuma fonte pública — ocultá-las esconde a maior parte do universo.",
+            )
+        with c3:
+            f_ativas = st.checkbox(
+                "Excluir baixadas/inaptas na Receita", value=True, key=f"{prefixo}_ativas"
+            )
+            f_contato = st.checkbox("Só com telefone ou site", value=False, key=f"{prefixo}_contato")
+            f_score = st.slider("Score mínimo", 0, 100, 0, 5, key=f"{prefixo}_score")
+    return {
+        "promissoras": f_prom, "perfis": f_perfis, "leitos_min": f_leitos,
+        "incluir_sem_leitos": f_sem_leitos, "so_ativas": f_ativas,
+        "so_contato": f_contato, "score_min": f_score,
+    }
+
+
+def aplicar_filtros_ilpis(df, f):
+    dados = df.copy()
+    if f["promissoras"]:
+        dados = dados[dados["promissora"] == 1]
+    if f["perfis"]:
+        dados = dados[dados["perfil_grupo"].isin(f["perfis"])]
+    if f["so_ativas"]:
+        dados = dados[~dados["situacao"].isin(["BAIXADA", "INAPTA", "SUSPENSA"])]
+    if f["leitos_min"] > 0:
+        com = dados["leitos_melhor"] >= f["leitos_min"]
+        dados = dados[com | (dados["leitos_melhor"].isna() if f["incluir_sem_leitos"] else False)]
+    elif not f["incluir_sem_leitos"]:
+        dados = dados[dados["leitos_melhor"].notna()]
+    if f["so_contato"]:
+        dados = dados[dados["telefone"].notna() | dados["website"].notna()]
+    if f["score_min"] > 0:
+        dados = dados[dados["score_porte"] >= f["score_min"]]
+    return dados
+
+
+def mapa_ilpis(df):
+    """Mapa de pontos (quando houver coordenadas) com cor por perfil."""
+    geo = df[df["lat"].notna() & df["lng"].notna()]
+    if geo.empty:
+        st.caption("Nenhuma casa com coordenadas para exibir no mapa.")
+        return
+    st.map(geo, latitude="lat", longitude="lng", color="cor_mapa", size=120)
+    st.caption(
+        f"{fmt_int(len(geo))} de {fmt_int(len(df))} casas com coordenadas · "
+        f"cor: 🟢 privada · ⚪ demais perfis"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Aba — ILPIs na região
+# ---------------------------------------------------------------------------
+def aba_ilpis_regiao(ilpis, municipios, selecao):
+    if ilpis.empty:
+        st.warning("Base de ILPIs não encontrada (dados_ilpis.csv).")
+        return
+    uf, municipio, distrito, bairro, cod_mun = selecao
+
+    if cod_mun:
+        dados = ilpis[ilpis["cd_mun"] == cod_mun]
+        mun_sel = municipios[municipios["CD_MUN"] == cod_mun]
+        trilha, titulo = ["Brasil", uf, municipio], f"ILPIs em {municipio}"
+    elif uf:
+        dados = ilpis[ilpis["nm_uf"] == uf]
+        mun_sel = municipios[municipios["state"] == uf]
+        trilha, titulo = ["Brasil", uf], f"ILPIs em {uf}"
+    else:
+        dados = ilpis
+        mun_sel = municipios[municipios["state"].isin(sorted(ilpis["nm_uf"].dropna().unique()))]
+        trilha, titulo = ["Brasil"], "ILPIs mapeadas — Sul e Sudeste"
+
+    st.caption(" › ".join(trilha))
+    st.subheader(titulo)
+    if distrito or bairro:
+        st.info("As ILPIs são listadas no nível do município — use a busca abaixo para refinar por bairro ou endereço.")
+
+    busca = st.text_input(
+        "🔎 Buscar por nome, bairro ou endereço", key="reg_busca",
+        placeholder="ex.: Moema, residencial, casa de repouso...",
+    )
+    f = filtros_ilpis("reg")
+
+    if busca:
+        dados = dados[dados["texto_busca"].str.contains(_sem_acento(busca), na=False)]
+    dados = aplicar_filtros_ilpis(dados, f)
+
+    if dados.empty:
+        st.info("Nenhuma ILPI mapeada para este recorte e filtros.")
+        return
+
+    leitos_validos = dados["leitos_melhor"].where(dados["leitos_do_grupo"] == 0)
+    pop70 = pd.to_numeric(mun_sel["elderly_total"], errors="coerce").sum()
+    leitos_total = leitos_validos.sum()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("ILPIs mapeadas", fmt_int(len(dados)))
+    c2.metric(
+        "Leitos conhecidos", fmt_int(leitos_total),
+        help="Soma apenas dos leitos informados em fontes públicas ou nos sites "
+             f"({fmt_int(leitos_validos.notna().sum())} casas) — subestima a oferta real.",
+    )
+    c3.metric("% privadas", f"{(dados['perfil_grupo'] == 'privada').mean():.0%}")
+    c4.metric(
+        "Leitos conhecidos / 1.000 idosos 70+",
+        fmt_int(leitos_total / pop70 * 1000) if pop70 > 0 else "—",
+        help="Oferta mapeada relativa à população 70+ do recorte.",
+    )
+    st.write("")
+
+    mapa_ilpis(dados)
+    st.write("")
+
+    tabela, config = montar_tabela_ilpis(dados.sort_values("score_porte", ascending=False))
+    st.dataframe(tabela, width="stretch", hide_index=True, column_config=config)
+    botao_download(tabela, "ilpis_regiao.csv", key="dl_ilpis_reg")
+
+    if uf and not cod_mun:
+        agg = agregar_ilpis_por_municipio(dados)
+        agg = agg.merge(municipios[["CD_MUN", "name"]], on="CD_MUN", how="left")
+        st.write("")
+        grafico_ranking(
+            agg, "name", f"Top {min(15, len(agg))} · Leitos conhecidos por município",
+            col_valor="leitos_conhecidos", rotulo_valor="Leitos conhecidos",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Aba — Casas promissoras (visão invertida)
+# ---------------------------------------------------------------------------
+ORDENACOES_PROMISSORAS = {
+    "Score de porte/evidência": ("score_porte", False),
+    "Leitos/vagas": ("leitos_melhor", False),
+    "Idosos > R$ 8 mil no município": ("elders_above_8k", False),
+    "Idosos > R$ 8 mil por leito conhecido": ("idosos8k_por_leito", False),
+}
+
+
+def aba_promissoras(ilpis, municipios):
+    if ilpis.empty:
+        st.warning("Base de ILPIs não encontrada (dados_ilpis.csv).")
+        return
+    st.caption(
+        "Visão invertida: parte das **casas** e traz a demografia da região como atributo. "
+        "Ignora a navegação da barra lateral — cobertura: Sul e Sudeste."
+    )
+
+    f = filtros_ilpis(
+        "prom", leitos_min=35, so_promissoras=False,
+        incluir_sem_leitos=False, perfis_default=["privada"],
+    )
+    dados = aplicar_filtros_ilpis(ilpis, f)
+
+    # região como atributo da casa
+    agg = agregar_ilpis_por_municipio(ilpis)
+    demog = municipios[["CD_MUN", "elderly_total", "avg_income", "elders_above_8k"]].copy()
+    for c in ("elderly_total", "avg_income", "elders_above_8k"):
+        demog[c] = pd.to_numeric(demog[c], errors="coerce")
+    dados = (
+        dados.merge(demog, left_on="cd_mun", right_on="CD_MUN", how="left")
+        .merge(agg[["CD_MUN", "leitos_conhecidos"]], on="CD_MUN", how="left")
+    )
+    dados["idosos8k_por_leito"] = np.where(
+        pd.to_numeric(dados["leitos_conhecidos"], errors="coerce") > 0,
+        dados["elders_above_8k"] / dados["leitos_conhecidos"], np.nan,
+    ).round(0)
+
+    st.markdown(f"**{fmt_int(len(dados))} casas** atendem aos critérios.")
+    if dados.empty:
+        st.info("Ajuste os filtros acima — ex.: reduza os leitos mínimos ou inclua casas sem leitos informados.")
+        return
+
+    ordem_rotulo = st.selectbox("Ordenar por", list(ORDENACOES_PROMISSORAS), key="prom_ordem")
+    col_ordem, asc = ORDENACOES_PROMISSORAS[ordem_rotulo]
+    dados = dados.sort_values(col_ordem, ascending=asc, na_position="last")
+
+    tabela, config = montar_tabela_ilpis(dados, incluir_regiao=True)
+    st.dataframe(tabela, width="stretch", hide_index=True, column_config=config)
+    botao_download(tabela, "ilpis_promissoras.csv", key="dl_prom")
+    st.write("")
+
+    mapa_ilpis(dados)
+    st.write("")
+    grafico_ranking(
+        dados.assign(rotulo_casa=dados["nome"].str.slice(0, 45) + " · " + dados["municipio"].fillna("")),
+        "rotulo_casa", f"Top {min(15, len(dados))} · Score de porte/evidência",
+        col_valor="score_porte", rotulo_valor="Score (0-100)",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Aba 1 — Exploração geográfica
 # ---------------------------------------------------------------------------
-def aba_exploracao(municipios, distritos, bairros, selecao, filtros):
+def aba_exploracao(municipios, distritos, bairros, selecao, filtros, agreg_ilpis=None):
     uf, municipio, distrito, bairro, cod_mun = selecao
     min_pop, min_renda = filtros
     col_bairro = coluna_nome_bairro(bairros)
@@ -531,7 +853,28 @@ def aba_exploracao(municipios, distritos, bairros, selecao, filtros):
         )
         st.write("")
 
-    tabela, config = montar_tabela(dados, col_nome, rotulo_nome, incluir_uf=(rotulo_nome == "Município"))
+    colunas_extras = None
+    if rotulo_nome == "Município" and agreg_ilpis is not None and not agreg_ilpis.empty:
+        if st.toggle(
+            "Mostrar oferta de ILPIs mapeadas", key="exp_oferta",
+            help="Acrescenta nº de ILPIs e leitos conhecidos por município (ver aba 🏠 e metodologia). "
+                 "Municípios com muitos idosos de renda alta e poucos leitos conhecidos indicam espaço de mercado.",
+        ):
+            dados = dados.merge(agreg_ilpis, on="CD_MUN", how="left")
+            for c in ("n_ilpis", "leitos_conhecidos"):
+                dados[c] = pd.to_numeric(dados[c], errors="coerce").fillna(0)
+            dados["idosos70_por_leito"] = np.where(
+                dados["leitos_conhecidos"] > 0,
+                (pd.to_numeric(dados["elderly_total"], errors="coerce")
+                 / dados["leitos_conhecidos"]).round(0),
+                np.nan,
+            )
+            colunas_extras = ["n_ilpis", "leitos_conhecidos", "idosos70_por_leito"]
+
+    tabela, config = montar_tabela(
+        dados, col_nome, rotulo_nome,
+        incluir_uf=(rotulo_nome == "Município"), colunas_extras=colunas_extras,
+    )
     st.dataframe(tabela, width="stretch", hide_index=True, column_config=config)
     botao_download(tabela, f"ilpi_{rotulo_nome.lower()}s.csv", key="dl_exploracao")
 
@@ -723,6 +1066,30 @@ def secao_metodologia():
                 permanência de padrão mais alto. Trate como *proxy* de mercado, não como contagem exata.
                 """
             )
+    with st.expander("🏠 Base de ILPIs mapeadas (oferta/concorrência)"):
+        st.markdown(
+            """
+            **Origem** — cruzamento de 7 famílias de fontes públicas (nov/2026): Censo SUAS 2024
+            (microdados oficiais), CadSUAS 2020, MDH 2020, CNMP, CNES set/2025, vigilâncias
+            sanitárias/MP locais, Google Maps e sites das instituições. Receita Federal para
+            natureza jurídica, porte e situação cadastral. **Cobertura: Sul e Sudeste.**
+
+            **Leitos conhecidos ≠ oferta total** — apenas ~25% das casas têm leitos informados em
+            alguma fonte; ILPIs privadas raramente publicam capacidade. Todos os indicadores de
+            oferta devem ser lidos como piso. Nas 291 casas com fonte "MDH 2020", o número é de
+            **residentes** em 2020 (piso da capacidade).
+
+            **Situação Receita vazia** = CNPJ não identificado (casa vista só no Google Maps) —
+            não significa inativa. Nota Google disponível só para MG, PR, RJ, RS e SC.
+
+            **Score de porte/evidência (0–100)** = capacidade (até 45) + reputação Google (até 20)
+            + presença digital (até 15) + registros oficiais (até 10) + capital social (até 10).
+            Mede evidência de porte e operação, **não** qualidade do serviço.
+
+            **"Promissora"** (marcação padrão) = perfil privado, não baixada/inapta na Receita e
+            35+ leitos/vagas conhecidos — os filtros permitem redefinir esse corte livremente.
+            """
+        )
     st.caption(
         "Fonte: IBGE, Censo Demográfico 2022 · Ferramenta de apoio à decisão para localização de ILPIs."
     )
@@ -735,6 +1102,7 @@ def main():
     try:
         with st.spinner("Carregando dados do Censo IBGE 2022..."):
             municipios, distritos, bairros = montar_bases()
+            ilpis = preparar_ilpis()
     except Exception as e:
         st.error(f"Erro ao carregar os dados: {e}")
         return
@@ -772,9 +1140,17 @@ def main():
     )
     st.write("")
 
-    tab_explorar, tab_comparar = st.tabs(["🗺️  Exploração geográfica", "⚖️  Comparar locais"])
+    agreg_ilpis = agregar_ilpis_por_municipio(ilpis)
+    tab_explorar, tab_ilpis, tab_prom, tab_comparar = st.tabs([
+        "🗺️  Exploração geográfica", "🏠  ILPIs na região",
+        "🎯  Casas promissoras", "⚖️  Comparar locais",
+    ])
     with tab_explorar:
-        aba_exploracao(municipios, distritos, bairros, selecao, (min_pop, min_renda))
+        aba_exploracao(municipios, distritos, bairros, selecao, (min_pop, min_renda), agreg_ilpis)
+    with tab_ilpis:
+        aba_ilpis_regiao(ilpis, municipios, selecao)
+    with tab_prom:
+        aba_promissoras(ilpis, municipios)
     with tab_comparar:
         aba_comparacao(municipios, distritos, bairros)
 
