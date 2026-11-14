@@ -58,9 +58,18 @@ def _origem() -> dict:
         candidatos = [c.strip() for c in xff.split(",") if c.strip()]
         publicos = [c for c in candidatos if not _privado(c)]
         ip = publicos[0] if publicos else (candidatos[0] if candidatos else ip)
+    # headers alternativos que alguns proxies usam para o IP real
+    for h in ("CF-Connecting-IP", "True-Client-IP", "X-Real-Ip", "X-Client-Ip",
+              "Fly-Client-Ip", "Fastly-Client-Ip"):
+        v = pega(h, h.lower())
+        if v and not _privado(v.split(",")[0].strip()):
+            ip = v.split(",")[0].strip()
+            break
     return {
         "ip": ip,
         "xff": xff or None,
+        "headers_ip": {k: v for k, v in headers.items()
+                       if any(t in k.lower() for t in ("ip", "forward", "client"))} or None,
         "user_agent": pega("User-Agent", "user-agent"),
         "referer": pega("Referer", "referer"),
         "idioma": getattr(st.context, "locale", None),
