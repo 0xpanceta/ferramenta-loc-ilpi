@@ -39,18 +39,28 @@ def _origem() -> dict:
     except Exception:
         headers = {}
     pega = lambda *ks: next((headers[k] for k in ks if k in headers), None)
+
+    def _privado(v):
+        import ipaddress
+        try:
+            return not ipaddress.ip_address(v.replace("::ffff:", "")).is_global
+        except ValueError:
+            return True
+
     try:
         ip = st.context.ip_address
     except Exception:
         ip = None
-    # atrás do proxy do Streamlit Cloud, ip_address devolve loopback;
-    # o IP real do visitante vem no X-Forwarded-For (primeiro da lista)
-    if not ip or "127.0.0.1" in str(ip) or str(ip) in ("::1", "localhost"):
-        xff = pega("X-Forwarded-For", "x-forwarded-for")
-        if xff:
-            ip = xff.split(",")[0].strip()
+    xff = pega("X-Forwarded-For", "x-forwarded-for") or ""
+    if not ip or _privado(str(ip)):
+        # atrás do proxy do Streamlit Cloud, ip_address e o início do
+        # X-Forwarded-For são IPs internos — pega o primeiro IP público da cadeia
+        candidatos = [c.strip() for c in xff.split(",") if c.strip()]
+        publicos = [c for c in candidatos if not _privado(c)]
+        ip = publicos[0] if publicos else (candidatos[0] if candidatos else ip)
     return {
         "ip": ip,
+        "xff": xff or None,
         "user_agent": pega("User-Agent", "user-agent"),
         "referer": pega("Referer", "referer"),
         "idioma": getattr(st.context, "locale", None),
