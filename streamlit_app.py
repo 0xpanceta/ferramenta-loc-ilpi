@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+import telemetria
+
 # ---------------------------------------------------------------------------
 # Identidade visual
 # ---------------------------------------------------------------------------
@@ -447,6 +449,9 @@ def botao_download(df, nome_arquivo, key):
         mime="text/csv",
         key=key,
         help="Separador ponto e vírgula e decimal com vírgula — abre direto no Excel brasileiro.",
+        on_click=telemetria.registrar,
+        args=("download",),
+        kwargs={"arquivo": nome_arquivo, "linhas": len(df)},
     )
 
 
@@ -584,11 +589,13 @@ def filtros_ilpis(prefixo, leitos_min=0, so_promissoras=False,
             )
             f_contato = st.checkbox("Só com telefone ou site", value=False, key=f"{prefixo}_contato")
             f_score = st.slider("Score mínimo", 0, 100, 0, 5, key=f"{prefixo}_score")
-    return {
+    filtros = {
         "promissoras": f_prom, "perfis": f_perfis, "leitos_min": f_leitos,
         "incluir_sem_leitos": f_sem_leitos, "so_ativas": f_ativas,
         "so_contato": f_contato, "score_min": f_score,
     }
+    telemetria.registrar_delta(f"filtros_ilpis_{prefixo}", filtros, evento="filtros_ilpis")
+    return filtros
 
 
 def aplicar_filtros_ilpis(df, f):
@@ -657,6 +664,7 @@ def aba_ilpis_regiao(ilpis, municipios, selecao):
     )
     f = filtros_ilpis("reg")
 
+    telemetria.registrar_delta("busca_ilpis", busca, evento="busca")
     if busca:
         dados = dados[dados["texto_busca"].str.contains(_sem_acento(busca), na=False)]
     dados = aplicar_filtros_ilpis(dados, f)
@@ -746,6 +754,7 @@ def aba_promissoras(ilpis, municipios):
         return
 
     ordem_rotulo = st.selectbox("Ordenar por", list(ORDENACOES_PROMISSORAS), key="prom_ordem")
+    telemetria.registrar_delta("ordenacao_promissoras", ordem_rotulo, evento="ordenacao")
     col_ordem, asc = ORDENACOES_PROMISSORAS[ordem_rotulo]
     dados = dados.sort_values(col_ordem, ascending=asc, na_position="last")
 
@@ -855,11 +864,13 @@ def aba_exploracao(municipios, distritos, bairros, selecao, filtros, agreg_ilpis
 
     colunas_extras = None
     if rotulo_nome == "Município" and agreg_ilpis is not None and not agreg_ilpis.empty:
-        if st.toggle(
+        mostrar_oferta = st.toggle(
             "Mostrar oferta de ILPIs mapeadas", key="exp_oferta",
             help="Acrescenta nº de ILPIs e leitos conhecidos por município (ver aba 🏠 e metodologia). "
                  "Municípios com muitos idosos de renda alta e poucos leitos conhecidos indicam espaço de mercado.",
-        ):
+        )
+        telemetria.registrar_delta("toggle_oferta_ilpis", mostrar_oferta, evento="toggle")
+        if mostrar_oferta:
             dados = dados.merge(agreg_ilpis, on="CD_MUN", how="left")
             for c in ("n_ilpis", "leitos_conhecidos"):
                 dados[c] = pd.to_numeric(dados[c], errors="coerce").fillna(0)
@@ -912,6 +923,7 @@ def aba_comparacao(municipios, distritos, bairros):
                 st.info(f"**{item['display_name']}** já está na comparação.")
             else:
                 st.session_state.comparacao.append(item)
+                telemetria.registrar("comparacao_add", local=item["display_name"], nivel=nivel)
 
     itens = st.session_state.comparacao
     if not itens:
@@ -1107,12 +1119,20 @@ def main():
         st.error(f"Erro ao carregar os dados: {e}")
         return
 
+    telemetria.registrar_sessao()
+
     with st.sidebar:
         st.markdown("### 🏡 Localização de ILPIs")
         st.caption("População 70+ e renda · Censo IBGE 2022")
         st.write("")
         st.markdown("**Navegação geográfica**")
         selecao = seletor_geografico("nav", municipios, distritos, bairros)
+        telemetria.registrar_delta(
+            "navegacao",
+            {"uf": selecao[0], "municipio": selecao[1],
+             "distrito": selecao[2], "bairro": selecao[3]},
+            evento="navegacao",
+        )
 
         st.divider()
         st.markdown("**Filtros**")
@@ -1123,6 +1143,11 @@ def main():
         min_renda = st.number_input(
             "Renda média mínima (R$)", min_value=0.0, value=0.0, step=500.0, key="f_renda",
             help="Oculta locais com renda média do responsável abaixo do valor definido.",
+        )
+
+        telemetria.registrar_delta(
+            "filtros_demograficos", {"min_pop": min_pop, "min_renda": min_renda},
+            evento="filtros_demograficos",
         )
 
         st.write("")
