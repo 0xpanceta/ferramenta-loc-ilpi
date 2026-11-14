@@ -43,8 +43,14 @@ def _origem() -> dict:
         ip = st.context.ip_address
     except Exception:
         ip = None
+    # atrás do proxy do Streamlit Cloud, ip_address devolve loopback;
+    # o IP real do visitante vem no X-Forwarded-For (primeiro da lista)
+    if not ip or "127.0.0.1" in str(ip) or str(ip) in ("::1", "localhost"):
+        xff = pega("X-Forwarded-For", "x-forwarded-for")
+        if xff:
+            ip = xff.split(",")[0].strip()
     return {
-        "ip": ip or pega("X-Forwarded-For", "x-forwarded-for"),
+        "ip": ip,
         "user_agent": pega("User-Agent", "user-agent"),
         "referer": pega("Referer", "referer"),
         "idioma": getattr(st.context, "locale", None),
